@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>小盤抽樣系統</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+:root{
+  --bg:#faf9f7; --surface:#ffffff; --surface2:#f7f5f2;
+  --border:#ece9e3; --border2:#d4cfc6;
+  --text:#1a1917; --text2:#6b6860; --text3:#9a9890;
+  --coral:#c0392b; --coral-bg:#fdf3f2;
+  --blue:#1a56c4; --blue-bg:#eef3fd;
+  --teal:#0f766e; --teal-bg:#edf7f5;
+  --amber:#92400e; --amber-bg:#fef7ec;
+  --red:#991b1b; --red-bg:#fdf2f2;
+  --green:#065f46; --green-bg:#edfaf4;
+  --r:8px; --r-lg:14px; --r-xl:18px;
+  --shadow:0 1px 3px rgba(0,0,0,.06),0 4px 12px rgba(0,0,0,.04);
+  --shadow-lg:0 4px 20px rgba(0,0,0,.08);
+  --header-h:60px;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'Helvetica Neue','PingFang TC','Microsoft JhengHei',sans-serif;background:var(--bg);color:var(--text);font-size:13px;min-height:100vh;}
+.mono{font-family:'SF Mono','Fira Code','Courier New',monospace;font-size:12px;}
+input[type=number]{font-family:'SF Mono','Fira Code','Courier New',monospace;font-weight:700;}
+input[type=number]::-webkit-inner-spin-button{opacity:1;}
+::-webkit-scrollbar{width:6px;height:6px;}
+::-webkit-scrollbar-track{background:var(--bg);}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px;}
+@media print{button,.no-print{display:none!important;}body{background:white!important;}}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useCallback } = React;
+
+// ── Design tokens（與廠退系統一致）──────────────────────────────────────────
+const C = {
+  bg:"#faf9f7", surface:"#ffffff", surface2:"#f7f5f2",
+  border:"#ece9e3", border2:"#d4cfc6",
+  text:"#1a1917", text2:"#6b6860", text3:"#9a9890",
+  coral:"#c0392b", coralBg:"#fdf3f2",
+  blue:"#1a56c4", blueBg:"#eef3fd",
+  teal:"#0f766e", tealBg:"#edf7f5",
+  amber:"#92400e", amberBg:"#fef7ec",
+  red:"#991b1b", redBg:"#fdf2f2",
+  green:"#065f46", greenBg:"#edfaf4",
+  dark:"#1a1917",
+};
+const CAT_COLORS=["#1a56c4","#0f766e","#92400e","#6d28d9","#065f46","#c05621"];
+
+// ── Sampling helpers ─────────────────────────────────────────────────────────
+function calcSuggested(data, catField, total=40){
+  const counts={};
+  data.forEach(r=>{const c=r[catField]??"未分類";counts[c]=(counts[c]||0)+1;});
+  const cats=Object.keys(counts);
+  const allocs={};
+  cats.forEach(c=>{allocs[c]=Math.max(1,Math.round(counts[c]/data.length*total));});
+  let sum=Object.values(allocs).reduce((a,b)=>a+b,0),diff=total-sum;
+  const sorted=[...cats].sort((a,b)=>counts[b]-counts[a]);
+  let i=0;
+  while(diff!==0&&i<cats.length*3){
+    const c=sorted[i%sorted.length];
+    if(diff>0&&allocs[c]<counts[c]){allocs[c]++;diff--;}
+    else if(diff<0&&allocs[c]>1){allocs[c]--;diff++;}
+    i++;
+  }
+  return{allocs,counts};
+}
+
+function stratifiedSample(data,catField,allocs){
+  const groups={};
+  data.forEach(r=>{const c=r[catField]??"未分類";if(!groups[c])groups[c]=[];groups[c].push(r);});
+  const result=[];
+  Object.entries(allocs).forEach(([cat,n])=>{
+    const pool=[...(groups[cat]||[])];
+    const take=Math.min(n,pool.length);
+    for(let j=0;j<take;j++){const ri=Math.floor(Math.random()*pool.length);result.push({...pool[ri]});pool.splice(ri,1);}
+  });
+  return result;
+}
+
+function stratifiedSampleWithTurnover(data,catField,allocs,turnoverMap,codeField){
+  const groups={};
+  data.forEach(r=>{const c=r[catField]??"未分類";if(!groups[c])groups[c]=[];groups[c].push(r);});
+  const result=[];
+  Object.entries(allocs).forEach(([cat,n])=>{
+    const all=[...(groups[cat]||[])].map(r=>({...r,_tr:turnoverMap[r[codeField]]??0}));
+    all.sort((a,b)=>b._tr-a._tr);
+    const cutoff=Math.max(1,Math.ceil(all.length*0.5));
+    const pPool=[...all.slice(0,cutoff)],fPool=[...all.slice(cutoff)];
+    const take=Math.min(n,all.length),picked=[];
+    while(picked.length<take&&pPool.length>0){const ri=Math.floor(Math.random()*pPool.length);picked.push(pPool[ri]);pPool.splice(ri,1);}
+    while(picked.length<take&&fPool.length>0){const ri=Math.floor(Math.random()*fPool.length);picked.push(fPool[ri]);fPool.splice(ri,1);}
+    picked.forEach(r=>{const{_tr,...rest}=r;result.push(rest);});
+  });
+  return result;
+}
+
+function exportExcel(sampled,detailRows,mainCols){
+  const wb=XLSX.utils.book_new();
+  const s1=sampled.map((r,i)=>{const o={"#":i+1};mainCols.forEach(c=>{o[c]=r[c]??""});return o;});
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(s1),"盤點清單");
+  const s2=detailRows.map((r,i)=>({  "#":i+1,...r}));
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(s2),"儲位明細");
+  XLSX.writeFile(wb,`小盤作業_${new Date().toISOString().slice(0,10)}.xlsx`);
+}
+
+// ── UI Components ────────────────────────────────────────────────────────────
+function Badge({color,bg,children}){
+  return <span style={{background:bg,color,border:`1px solid ${color}33`,borderRadius:20,padding:"2px 9px",fontSize:11,fontWeight:600,whiteSpace:"nowrap"}}>{children}</span>;
+}
+function Btn({children,onClick,variant="default",disabled,small,style:s={}}){
+  const base={display:"inline-flex",alignItems:"center",gap:5,borderRadius:"var(--r)",fontFamily:"inherit",cursor:disabled?"not-allowed":"pointer",fontWeight:500,fontSize:small?11:12,padding:small?"5px 11px":"8px 16px",transition:"all .15s",opacity:disabled?.45:1,whiteSpace:"nowrap",...s};
+  if(variant==="dark") return <button onClick={onClick} disabled={disabled} style={{...base,background:C.dark,border:`1px solid ${C.dark}`,color:"#fff"}}>{children}</button>;
+  if(variant==="coral") return <button onClick={onClick} disabled={disabled} style={{...base,background:C.coral,border:`1px solid ${C.coral}`,color:"#fff"}}>{children}</button>;
+  if(variant==="teal") return <button onClick={onClick} disabled={disabled} style={{...base,background:C.teal,border:`1px solid ${C.teal}`,color:"#fff"}}>{children}</button>;
+  return <button onClick={onClick} disabled={disabled} style={{...base,background:C.surface,border:`1px solid ${C.border2}`,color:C.text}}>{children}</button>;
+}
+function Card({children,style:s={}}){
+  return <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:"var(--r-lg)",boxShadow:"var(--shadow)",...s}}>{children}</div>;
+}
+
+// ── Step indicator ───────────────────────────────────────────────────────────
+function Steps({current}){
+  const steps=["上傳檔案","設定抽樣","盤點確認","匯出結果"];
+  return(
+    <div style={{display:"flex",alignItems:"center",gap:0}}>
+      {steps.map((s,i)=>(
+        <div key={i} style={{display:"flex",alignItems:"center"}}>
+          <div style={{display:"flex",alignItems:"center",gap:7}}>
+            <div style={{width:24,height:24,borderRadius:"50%",fontSize:11,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",
+              background:current>i?C.dark:current===i?C.coral:C.border2,
+              color:current>=i?"#fff":C.text3,flexShrink:0}}>
+              {current>i?"✓":i+1}
+            </div>
+            <span style={{fontSize:12,color:current>=i?C.text:C.text3,fontWeight:current===i?600:400}}>{s}</span>
+          </div>
+          {i<steps.length-1&&<div style={{width:24,height:1,background:current>i?C.border2:C.border,margin:"0 10px"}}/>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Swap Modal ───────────────────────────────────────────────────────────────
+const SWAP_COLS=["大分類","商品代號","品名","庫存數量"];
+
+function SwapModal({row,catField,qtyField,allData,sampledCodes,codeField,onSwap,onClose,catColor,turnoverMap}){
+  const cat=row[catField]??"未分類";
+  const pool=allData.filter(r=>(r[catField]??"未分類")===cat&&!sampledCodes.has(r[codeField]));
+  const [search,setSearch]=useState("");
+  const [sel,setSel]=useState(null);
+  const hasTr=!!turnoverMap;
+
+  const filtered=pool.filter(r=>SWAP_COLS.some(k=>String(r[k]??"").toLowerCase().includes(search.toLowerCase())));
+  const sorted=hasTr?[...filtered].sort((a,b)=>(turnoverMap[b[codeField]]??0)-(turnoverMap[a[codeField]]??0)):filtered;
+  const curTr=hasTr?(turnoverMap[row[codeField]]??0):null;
+
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",backdropFilter:"blur(2px)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:20}} onClick={onClose}>
+      <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:"var(--r-xl)",width:"100%",maxWidth:hasTr?680:600,maxHeight:"82vh",display:"flex",flexDirection:"column",overflow:"hidden",boxShadow:"var(--shadow-lg)"}} onClick={e=>e.stopPropagation()}>
+
+        {/* Header */}
+        <div style={{padding:"20px 24px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",gap:12}}>
+          <div style={{flex:1}}>
+            <div style={{fontSize:11,color:C.text3,marginBottom:5}}>替換品項 — <span style={{fontWeight:600,color:catColor}}>{cat}</span></div>
+            <div style={{fontSize:15,fontWeight:700}}>同分類可替換：{pool.length} 筆{hasTr&&" · 已依迴轉率排序"}</div>
+          </div>
+          <button onClick={onClose} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:"var(--r)",color:C.text3,width:30,height:30,cursor:"pointer",fontSize:15,display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
+        </div>
+
+        {/* Current item */}
+        <div style={{padding:"12px 24px",background:C.surface2,borderBottom:`1px solid ${C.border}`}}>
+          <div style={{fontSize:10,color:C.text3,letterSpacing:1,marginBottom:8,fontWeight:600,textTransform:"uppercase"}}>目前品項</div>
+          <div style={{display:"flex",gap:24,flexWrap:"wrap",alignItems:"flex-end"}}>
+            {SWAP_COLS.map(k=>(
+              <div key={k}>
+                <div style={{fontSize:10,color:C.text3,marginBottom:3}}>{k}</div>
+                <div style={{fontSize:13,fontWeight:600,color:k===qtyField&&Number(row[k])<5?C.coral:k===catField?catColor:C.text,fontFamily:k===qtyField?"'SF Mono',monospace":"inherit"}}>
+                  {row[k]??"-"}{k===qtyField&&Number(row[k])<5?" ⚠":""}
+                </div>
+              </div>
+            ))}
+            {hasTr&&<div>
+              <div style={{fontSize:10,color:C.text3,marginBottom:3}}>迴轉率</div>
+              <div style={{fontSize:13,fontWeight:700,fontFamily:"'SF Mono',monospace",color:curTr>0?C.teal:C.text3}}>{curTr!=null?curTr.toFixed(2):"-"}</div>
+            </div>}
+          </div>
+        </div>
+
+        {/* Search */}
+        <div style={{padding:"10px 24px",borderBottom:`1px solid ${C.border}`}}>
+          <input placeholder="搜尋商品代號、品名..." value={search} onChange={e=>setSearch(e.target.value)}
+            style={{width:"100%",background:C.surface2,border:`1px solid ${C.border}`,borderRadius:"var(--r)",color:C.text,padding:"7px 12px",fontSize:12,fontFamily:"inherit",outline:"none"}}/>
+        </div>
+
+        {/* List */}
+        <div style={{flex:1,overflowY:"auto"}}>
+          {sorted.length===0
+            ?<div style={{padding:40,textAlign:"center",color:C.text3,fontSize:13}}>{pool.length===0?"此分類已無其他可替換品項":"查無符合的品項"}</div>
+            :<>
+              <div style={{display:"grid",gridTemplateColumns:hasTr?"28px 1fr 2fr 72px 68px":"28px 1fr 2fr 80px",gap:12,padding:"8px 24px",background:C.surface2,borderBottom:`1px solid ${C.border}`,fontSize:11,color:C.text2,fontWeight:700,letterSpacing:.3,textTransform:"uppercase"}}>
+                <div/><div>商品代號</div><div>品名</div><div style={{textAlign:"right"}}>庫存</div>
+                {hasTr&&<div style={{textAlign:"right",color:C.teal}}>迴轉率</div>}
+              </div>
+              {sorted.map((r,i)=>{
+                const isLow=Number(r[qtyField])<5;
+                const isSel=sel===i;
+                const tr=hasTr?(turnoverMap[r[codeField]]??0):null;
+                return(
+                  <div key={i} onClick={()=>setSel(isSel?null:i)} style={{display:"grid",gridTemplateColumns:hasTr?"28px 1fr 2fr 72px 68px":"28px 1fr 2fr 80px",gap:12,padding:"10px 24px",cursor:"pointer",borderBottom:`1px solid ${C.border}`,alignItems:"center",background:isSel?C.surface2:"transparent",borderLeft:isSel?`3px solid ${C.dark}`:isLow?`3px solid ${C.coral}44`:"3px solid transparent",transition:"background .1s"}}>
+                    <div style={{width:16,height:16,borderRadius:"50%",border:`2px solid ${isSel?C.dark:C.border2}`,background:isSel?C.dark:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                      {isSel&&<div style={{width:5,height:5,borderRadius:"50%",background:"#fff"}}/>}
+                    </div>
+                    <div style={{fontSize:12,color:C.text2,fontFamily:"'SF Mono',monospace"}}>{r[codeField]}</div>
+                    <div style={{fontSize:12,color:C.text,fontWeight:isSel?600:400}}>{r["品名"]}</div>
+                    <div style={{fontSize:12,fontWeight:600,textAlign:"right",fontFamily:"'SF Mono',monospace",color:isLow?C.coral:C.text}}>{r[qtyField]??"-"}{isLow?" ⚠":""}</div>
+                    {hasTr&&<div style={{fontSize:12,fontWeight:600,textAlign:"right",fontFamily:"'SF Mono',monospace",color:tr>0?C.teal:C.text3}}>{tr!=null?tr.toFixed(2):"-"}</div>}
+                  </div>
+                );
+              })}
+            </>
+          }
+        </div>
+
+        {/* Footer */}
+        <div style={{padding:"14px 24px",borderTop:`1px solid ${C.border}`,display:"flex",gap:8,justifyContent:"flex-end",alignItems:"center"}}>
+          {sel!==null&&<span style={{fontSize:11,color:C.text2,flex:1}}>已選：{sorted[sel]["品名"]}</span>}
+          <Btn onClick={onClose}>取消</Btn>
+          <Btn variant="dark" disabled={sel===null} onClick={()=>sel!==null&&onSwap(sorted[sel])}>💾 確認替換</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Main App ─────────────────────────────────────────────────────────────────
+function App(){
+  const [step,setStep]           = useState(0);
+  const [dragging,setDragging]   = useState(false);
+  const [fileName,setFileName]   = useState("");
+  const [mainData,setMainData]   = useState([]);
+  const [detailData,setDetailData]=useState([]);
+  const [mainCols,setMainCols]   = useState([]);
+  const catField="大分類", codeField="商品代號", qtyField="庫存數量", locField="儲位", vehicleField="載具條碼";
+  const [suggested,setSuggested] = useState({});
+  const [allocs,setAllocs]       = useState({});
+  const [catCounts,setCatCounts] = useState({});
+  const [sampled,setSampled]     = useState([]);
+  const [swapTarget,setSwapTarget]=useState(null);
+  const [swapLog,setSwapLog]     = useState([]);
+  const [detailRows,setDetailRows]=useState([]);
+  const [turnoverMap,setTurnoverMap]=useState(null);
+  const [usingTurnover,setUsingTurnover]=useState(false);
+
+  const totalAlloc=Object.values(allocs).reduce((a,b)=>a+Number(b),0);
+  const catColors={};
+  Object.keys(catCounts).forEach((c,i)=>{catColors[c]=CAT_COLORS[i%CAT_COLORS.length];});
+  const sampledCodes=new Set(sampled.map(r=>r[codeField]));
+  const lowCount=sampled.filter(r=>Number(r[qtyField])<5).length;
+
+  const processFile=useCallback((file)=>{
+    if(!file) return;
+    setFileName(file.name);
+    const reader=new FileReader();
+    reader.onload=e=>{
+      const wb=XLSX.read(e.target.result,{type:"array"});
+      const ws1=wb.Sheets["總量"];
+      if(!ws1){alert("找不到「總量」分頁！");return;}
+      const raw=XLSX.utils.sheet_to_json(ws1,{defval:""});
+
+      // ── 過濾條件：
+      // 1. 庫存數量 > 0
+      // 2. 排除備品耗材
+      // 3. 只取庫區 70（良品）作為抽樣池
+      //    庫區 77（不良品）不列入抽樣，但匯出儲位明細時會一併帶出
+      const filtered=raw.filter(r=>
+        Number(r["庫存數量"])>0 &&
+        (r["大分類"]??"").trim()!=="備品耗材" &&
+        (r["大分類"]??"").trim()!=="備品秏材" &&
+        String(r["庫區"]).trim()==="70"
+      );
+      const cols=raw.length>0?Object.keys(raw[0]):[];
+      setMainData(filtered);
+      setMainCols(cols.filter(c=>!["項次","庫區","客戶代號","專案別代號","通路別代號","供應商代號","供貨別代號","廠區代號","公司別","倉庫別","虛擬代號"].includes(c)));
+      const ws2=wb.Sheets["明細表"];
+      if(ws2) setDetailData(XLSX.utils.sheet_to_json(ws2,{defval:""}));
+      const{allocs:sug,counts}=calcSuggested(filtered,"大分類",40);
+      setSuggested({...sug});setAllocs({...sug});setCatCounts(counts);
+      setTurnoverMap(null);setUsingTurnover(false);
+      setStep(1);
+    };
+    reader.readAsArrayBuffer(file);
+  },[]);
+
+  const handleDrop=e=>{e.preventDefault();setDragging(false);processFile(e.dataTransfer.files[0]);};
+  const handleFile=e=>processFile(e.target.files[0]);
+
+  // runSample：允許分類為 0（直接跳過該分類）
+  const runSample=(withTr=false)=>{
+    const fa={};
+    Object.entries(allocs).forEach(([c,n])=>{
+      const v=Math.max(0,Number(n)||0); // 允許為 0，歸 0 的分類不抽樣
+      if(v>0) fa[c]=v;
+    });
+    const result=withTr&&turnoverMap
+      ?stratifiedSampleWithTurnover(mainData,catField,fa,turnoverMap,codeField)
+      :stratifiedSample(mainData,catField,fa);
+    setUsingTurnover(withTr&&!!turnoverMap);
+    setSampled(result);setSwapLog([]);setStep(2);
+  };
+
+  const doSwap=newRow=>{
+    const old=sampled[swapTarget];
+    const next=[...sampled];next[swapTarget]={...newRow};
+    setSampled(next);
+    setSwapLog(log=>[{time:new Date().toLocaleTimeString(),idx:swapTarget+1,old,newRow},...log]);
+    setSwapTarget(null);
+  };
+
+  const confirmAndExport=()=>{
+    const codes=new Set(sampled.map(r=>r[codeField]));
+    // 儲位明細同時帶出庫區 70（良品）和庫區 77（不良品）
+    // 這樣盤點時不會因為漏盤庫區 77 造成盤損
+    const rows=detailData.filter(r=>
+      codes.has(r[codeField]) &&
+      (String(r["庫區"]).trim()==="70" || String(r["庫區"]).trim()==="77")
+    );
+    const detailCols=["商品代號","品名","大分類","庫區","載具條碼","儲位","庫存數量","可用量","到期日","最後到店日"].filter(c=>detailData.length>0&&c in detailData[0]);
+    const trimmed=rows.map(r=>{const o={};detailCols.forEach(c=>{o[c]=r[c]??""});return o;});
+    setDetailRows(trimmed);exportExcel(sampled,trimmed,mainCols);setStep(3);
+  };
+
+  return(
+    <div style={{minHeight:"100vh",background:C.bg,color:C.text}}>
+
+      {/* ── Header ── */}
+      <div style={{background:C.surface,borderBottom:`1px solid ${C.border}`,padding:"0 20px",display:"flex",alignItems:"center",justifyContent:"space-between",height:"var(--header-h)",position:"sticky",top:0,zIndex:50,boxShadow:"0 1px 0 var(--border)"}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <div style={{width:32,height:32,background:C.coral,borderRadius:"var(--r)",display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontSize:15,fontWeight:700,flexShrink:0}}>盤</div>
+          <div>
+            <div style={{fontSize:15,fontWeight:700,letterSpacing:"-0.3px"}}>小盤抽樣系統</div>
+            <div style={{fontSize:10,color:C.text3,letterSpacing:1}}>INVENTORY SAMPLER</div>
+          </div>
+        </div>
+        {step>0&&<Steps current={step-1}/>}
+        <div style={{width:120}}/>
+      </div>
+
+      <div style={{maxWidth:1100,margin:"0 auto",padding:"28px 20px 80px"}}>
+
+        {/* ══ STEP 0 ══ */}
+        {step===0&&(
+          <div style={{maxWidth:480,margin:"80px auto",textAlign:"center"}}>
+            <h1 style={{fontSize:22,fontWeight:700,marginBottom:8}}>上傳庫存資料</h1>
+            <p style={{color:C.text2,fontSize:13,lineHeight:1.9,marginBottom:28}}>
+              需包含「<strong>總量</strong>」與「<strong>明細表</strong>」兩個分頁<br/>
+              抽樣只取庫區 70（良品），儲位明細同時帶出庫區 77
+            </p>
+            <label onDragOver={e=>{e.preventDefault();setDragging(true);}} onDragLeave={()=>setDragging(false)} onDrop={handleDrop}
+              style={{display:"block",border:`2px dashed ${dragging?C.coral:C.border2}`,borderRadius:"var(--r-xl)",padding:"56px 32px",cursor:"pointer",background:dragging?"#fdf8f7":C.surface,transition:"all .2s"}}>
+              <input type="file" accept=".xlsx,.xls" onChange={handleFile} style={{display:"none"}}/>
+              <div style={{width:48,height:48,background:dragging?C.coralBg:C.surface2,border:`1px solid ${C.border}`,borderRadius:"var(--r-lg)",display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 16px",fontSize:22}}>↑</div>
+              <div style={{fontSize:14,fontWeight:600,color:dragging?C.coral:C.text,marginBottom:5}}>點擊或拖曳 Excel 檔案</div>
+              <div style={{fontSize:11,color:C.text3}}>支援 .xlsx / .xls 格式</div>
+            </label>
+          </div>
+        )}
+
+        {/* ══ STEP 1 ══ */}
+        {step===1&&(
+          <div style={{maxWidth:600,margin:"0 auto"}}>
+            {/* File info */}
+            <Card style={{padding:"14px 18px",marginBottom:16,display:"flex",alignItems:"center",gap:12}}>
+              <div style={{width:32,height:32,background:C.surface2,border:`1px solid ${C.border}`,borderRadius:"var(--r)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,color:C.text2,flexShrink:0}}>XLS</div>
+              <div style={{flex:1}}>
+                <div style={{fontSize:13,fontWeight:600}}>{fileName}</div>
+                <div style={{fontSize:11,color:C.text3,marginTop:2}}>庫區 70 有效資料 {mainData.length} 筆（已排除備品耗材 + 庫存為零 + 庫區 77）</div>
+              </div>
+              <Btn small onClick={()=>setStep(0)}>重新上傳</Btn>
+            </Card>
+
+            <Card style={{padding:22}}>
+              <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:20}}>
+                <div>
+                  <div style={{fontSize:14,fontWeight:700}}>設定各分類抽樣筆數</div>
+                  <div style={{fontSize:11,color:C.text3,marginTop:3}}>可手動調整，系統已依比例計算建議值</div>
+                </div>
+                <div style={{textAlign:"right",background:C.surface2,border:`1px solid ${C.border}`,borderRadius:"var(--r)",padding:"10px 16px"}}>
+                  <div style={{fontSize:10,color:C.text3,letterSpacing:1}}>總計抽樣</div>
+                  <div style={{fontSize:30,fontWeight:800,color:C.blue,lineHeight:1.1,fontFamily:"'SF Mono',monospace"}}>{totalAlloc}</div>
+                  <div style={{fontSize:10,color:C.text3}}>筆</div>
+                </div>
+              </div>
+
+              {/* Category rows */}
+              <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                {Object.entries(catCounts).sort((a,b)=>b[1]-a[1]).map(([cat,total],i)=>{
+                  const color=catColors[cat]||C.blue;
+                  const pct=Math.round(total/mainData.length*100);
+                  const sug=suggested[cat]||1;
+                  return(
+                    <div key={cat} style={{display:"flex",alignItems:"center",gap:12}}>
+                      <div style={{width:8,height:8,borderRadius:"50%",background:color,flexShrink:0}}/>
+                      <div style={{flex:1}}>
+                        <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
+                          <span style={{fontSize:13,fontWeight:600}}>{cat}</span>
+                          <span style={{fontSize:11,color:C.text3}}>{total} 筆（{pct}%）· 建議 {sug} 筆</span>
+                        </div>
+                        <div style={{height:4,background:C.border,borderRadius:4}}>
+                          <div style={{width:`${pct}%`,height:"100%",background:color,borderRadius:4}}/>
+                        </div>
+                      </div>
+                      <div style={{display:"flex",alignItems:"center",gap:5,flexShrink:0}}>
+                        <button onClick={()=>setAllocs(a=>({...a,[cat]:Math.max(0,Number(a[cat]??sug)-1)}))}
+                          style={{width:28,height:28,background:C.surface2,border:`1px solid ${C.border}`,borderRadius:"var(--r)",color:C.text,cursor:"pointer",fontSize:16,fontWeight:700,lineHeight:1}}>−</button>
+                        <input type="number" min={0} max={total} value={allocs[cat]??sug}
+                          onChange={e=>setAllocs(a=>({...a,[cat]:Math.max(0,parseInt(e.target.value)||0)}))}
+                          style={{width:52,textAlign:"center",background:Number(allocs[cat]??sug)===0?C.surface2:C.surface,border:`1px solid ${Number(allocs[cat]??sug)===0?C.border2:C.border2}`,borderRadius:"var(--r)",color:Number(allocs[cat]??sug)===0?C.text3:C.text,padding:"5px 0",fontSize:14}}/>
+                        <button onClick={()=>setAllocs(a=>({...a,[cat]:Math.min(total,Number(a[cat]??sug)+1)}))}
+                          style={{width:28,height:28,background:C.surface2,border:`1px solid ${C.border}`,borderRadius:"var(--r)",color:C.text,cursor:"pointer",fontSize:16,fontWeight:700,lineHeight:1}}>+</button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Turnover upload */}
+              <div style={{marginTop:18,padding:"14px 16px",background:turnoverMap?C.tealBg:C.surface2,border:`1px solid ${turnoverMap?C.teal+"66":C.border}`,borderRadius:"var(--r-lg)"}}>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <div style={{width:28,height:28,background:turnoverMap?C.tealBg:C.surface,border:`1px solid ${turnoverMap?C.teal+"66":C.border}`,borderRadius:"var(--r)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,color:turnoverMap?C.teal:C.text3,flexShrink:0}}>迴</div>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:12,fontWeight:600,color:turnoverMap?C.teal:C.text}}>{turnoverMap?"迴轉率資料已載入 ✓":"參考迴轉率（選用）"}</div>
+                    <div style={{fontSize:11,color:C.text3,marginTop:1}}>{turnoverMap?"套用後從各分類迴轉率前 50% 優先抽樣":"上傳後可選擇依迴轉率優先抽樣"}</div>
+                  </div>
+                  {turnoverMap
+                    ?<button onClick={()=>{setTurnoverMap(null);setUsingTurnover(false);}} style={{background:"none",border:`1px solid ${C.teal}`,borderRadius:"var(--r)",color:C.teal,padding:"4px 12px",fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:600}}>移除</button>
+                    :<label style={{background:C.surface,border:`1px solid ${C.border2}`,borderRadius:"var(--r)",padding:"6px 14px",fontSize:11,fontWeight:500,color:C.text,cursor:"pointer",whiteSpace:"nowrap",display:"inline-flex",alignItems:"center",gap:5}}>
+                        <input type="file" accept=".xlsx,.xls" onChange={e=>{
+                          const file=e.target.files[0];if(!file) return;
+                          const reader=new FileReader();
+                          reader.onload=ev=>{
+                            try{
+                              const wb=XLSX.read(ev.target.result,{type:"array"});
+                              const ws=wb.Sheets[wb.SheetNames[0]];
+                              const allRows=XLSX.utils.sheet_to_json(ws,{header:1,defval:""});
+                              let hIdx=-1,cIdx=-1,rIdx=-1;
+                              for(let r=0;r<Math.min(5,allRows.length);r++){
+                                const row=allRows[r].map(v=>String(v).trim());
+                                const ci=row.indexOf("商品代號"),ri=row.indexOf("迴轉率");
+                                if(ci>=0&&ri>=0){hIdx=r;cIdx=ci;rIdx=ri;break;}
+                              }
+                              if(hIdx<0){alert("找不到「商品代號」或「迴轉率」欄位");return;}
+                              const map={};
+                              for(let r=hIdx+1;r<allRows.length;r++){
+                                const row=allRows[r];
+                                const code=String(row[cIdx]??"").trim();
+                                if(code) map[code]=Number(row[rIdx]??0);
+                              }
+                              if(Object.keys(map).length===0){alert("資料筆數為 0，請確認檔案");return;}
+                              setTurnoverMap(map);
+                            }catch(err){alert("讀取失敗："+err.message);}
+                          };
+                          reader.readAsArrayBuffer(file);e.target.value="";
+                        }} style={{display:"none"}}/>
+                        ⬆ 上傳迴轉率 Excel
+                      </label>
+                  }
+                </div>
+              </div>
+
+              {/* Action buttons */}
+              <div style={{marginTop:18,paddingTop:16,borderTop:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                <div style={{fontSize:12,color:C.text2}}>總抽樣筆數：<span style={{color:C.blue,fontWeight:700,fontFamily:"'SF Mono',monospace",fontSize:15}}>{totalAlloc}</span> 筆</div>
+                <div style={{display:"flex",gap:8}}>
+                  {turnoverMap&&<Btn variant="teal" onClick={()=>runSample(true)}>📊 依迴轉率抽樣</Btn>}
+                  <Btn variant={turnoverMap?"default":"dark"} onClick={()=>runSample(false)}>
+                    {turnoverMap?"🔀 純隨機抽樣":"▶ 開始隨機抽樣"}
+                  </Btn>
+                </div>
+              </div>
+            </Card>
+          </div>
+        )}
+
+        {/* ══ STEP 2 ══ */}
+        {step===2&&(
+          <div>
+            {/* Stat cards */}
+            <div style={{display:"flex",gap:12,marginBottom:16,flexWrap:"wrap"}}>
+              {[
+                {label:"抽樣總筆數",val:sampled.length,color:C.blue},
+                {label:"分類數",val:Object.keys(catColors).length,color:C.teal},
+                ...(lowCount>0?[{label:"庫存偏低(<5)",val:lowCount,color:C.coral}]:[]),
+              ].map(s=>(
+                <Card key={s.label} style={{padding:"14px 20px",borderLeft:`3px solid ${s.color}`}}>
+                  <div style={{fontSize:11,color:C.text3,marginBottom:4}}>{s.label}</div>
+                  <div style={{fontSize:30,fontWeight:800,color:s.color,lineHeight:1,fontFamily:"'SF Mono',monospace"}}>{s.val}</div>
+                </Card>
+              ))}
+              <Card style={{padding:"14px 18px",flex:"1 1 200px"}}>
+                <div style={{fontSize:11,color:C.text3,marginBottom:8}}>各分類抽取數</div>
+                <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                  {Object.entries(catColors).map(([cat,color])=>{
+                    const n=sampled.filter(r=>(r[catField]??"未分類")===cat).length;
+                    return <Badge key={cat} color={color} bg={color+"15"}>{cat} × {n}</Badge>;
+                  })}
+                </div>
+              </Card>
+            </div>
+
+            {/* Mode + warning banners */}
+            {usingTurnover&&(
+              <div style={{background:C.tealBg,border:`1px solid ${C.teal}44`,borderRadius:"var(--r)",padding:"10px 16px",marginBottom:10,fontSize:12,color:C.teal,display:"flex",gap:8,alignItems:"center"}}>
+                <span>已套用迴轉率：從各分類迴轉率前 50% 優先抽樣</span>
+                <button onClick={()=>runSample(false)} style={{marginLeft:"auto",background:"none",border:`1px solid ${C.teal}`,borderRadius:"var(--r)",color:C.teal,padding:"3px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:600}}>切回純隨機</button>
+              </div>
+            )}
+            {lowCount>0&&(
+              <div style={{background:C.amberBg,border:`1px solid ${C.amber}44`,borderRadius:"var(--r)",padding:"10px 16px",marginBottom:10,fontSize:12,color:C.amber,display:"flex",gap:8,alignItems:"center"}}>
+                <span>有 <strong>{lowCount}</strong> 筆品項庫存低於 5，建議點擊「替換」更換品項。</span>
+              </div>
+            )}
+
+            {/* Action bar */}
+            <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap",alignItems:"center"}}>
+              <Btn variant="dark" onClick={confirmAndExport}>✓ 確認完成並匯出</Btn>
+              <Btn onClick={()=>runSample(usingTurnover&&!!turnoverMap)}>🔀 重新抽樣</Btn>
+              <Btn onClick={()=>setStep(1)}>← 調整設定</Btn>
+              <span style={{flex:1}}/>
+              <span style={{fontSize:11,color:C.text3}}>點擊各列「替換」按鈕可更換品項</span>
+            </div>
+
+            {/* Table */}
+            <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:"var(--r-lg)",boxShadow:"var(--shadow)",overflow:"auto",marginBottom:20}}>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                <thead>
+                  <tr style={{background:C.surface2,borderBottom:`1px solid ${C.border}`}}>
+                    <th style={{padding:"10px 12px",color:C.text2,textAlign:"left",width:40,fontSize:11,fontWeight:700,letterSpacing:.4,textTransform:"uppercase"}}>#</th>
+                    {mainCols.map(col=>(
+                      <th key={col} style={{padding:"10px 12px",color:C.text2,textAlign:"left",whiteSpace:"nowrap",fontSize:11,fontWeight:700,letterSpacing:.4,textTransform:"uppercase"}}>{col}</th>
+                    ))}
+                    <th style={{padding:"10px 12px",color:C.text2,textAlign:"center",width:72,fontSize:11,fontWeight:700,letterSpacing:.4,textTransform:"uppercase"}}>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sampled.map((row,i)=>{
+                    const cat=row[catField]??"未分類";
+                    const color=catColors[cat]||C.blue;
+                    const isLow=Number(row[qtyField])<5;
+                    const wasSwapped=swapLog.some(l=>l.idx===i+1);
+                    return(
+                      <tr key={i} style={{borderBottom:`1px solid ${C.border}`,background:isLow?"#fff9f9":wasSwapped?"#f0fdf4":i%2===0?C.surface:C.surface2,borderLeft:isLow?`3px solid ${C.coral}`:wasSwapped?`3px solid ${C.teal}`:"3px solid transparent"}}>
+                        <td style={{padding:"9px 12px",color:C.text3,fontSize:11}}>{i+1}</td>
+                        {mainCols.map(col=>(
+                          <td key={col} style={{padding:"9px 12px",whiteSpace:"nowrap"}}>
+                            {col===catField
+                              ?<Badge color={color} bg={color+"15"}>{row[col]}</Badge>
+                              :col===qtyField&&isLow
+                              ?<span style={{color:C.coral,fontWeight:700,fontFamily:"'SF Mono',monospace",fontSize:12}}>{row[col]} ⚠</span>
+                              :col===qtyField
+                              ?<span style={{fontFamily:"'SF Mono',monospace",fontSize:12}}>{row[col]}</span>
+                              :<span>{row[col]}</span>
+                            }
+                          </td>
+                        ))}
+                        <td style={{padding:"9px 12px",textAlign:"center"}}>
+                          <button onClick={()=>setSwapTarget(i)} style={{background:isLow?C.coralBg:C.surface2,border:`1px solid ${isLow?C.coral:C.border2}`,borderRadius:"var(--r)",color:isLow?C.coral:C.text,padding:"4px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:500}}>⇄ 替換</button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Swap log */}
+            {swapLog.length>0&&(
+              <Card style={{padding:18}}>
+                <div style={{fontSize:11,color:C.text3,fontWeight:700,letterSpacing:.5,textTransform:"uppercase",marginBottom:10}}>替換記錄（{swapLog.length} 次）</div>
+                <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                  {swapLog.map((l,i)=>(
+                    <div key={i} style={{fontSize:11,display:"flex",gap:10,padding:"7px 12px",background:C.surface2,border:`1px solid ${C.border}`,borderRadius:"var(--r)",alignItems:"center",flexWrap:"wrap"}}>
+                      <span style={{color:C.text3,fontFamily:"'SF Mono',monospace"}}>{l.time}</span>
+                      <span style={{color:C.text2}}>第 {l.idx} 筆</span>
+                      <span style={{color:C.coral}}>{l.old[codeField]} {l.old["品名"]}</span>
+                      <span style={{color:C.text3}}>→</span>
+                      <span style={{color:C.teal}}>{l.newRow[codeField]} {l.newRow["品名"]}</span>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+            )}
+          </div>
+        )}
+
+        {/* ══ STEP 3 ══ */}
+        {step===3&&(
+          <div>
+            <div style={{background:C.greenBg,border:`1px solid ${C.green}44`,borderRadius:"var(--r-lg)",padding:"18px 22px",marginBottom:20,display:"flex",alignItems:"center",gap:14}}>
+              <div style={{width:36,height:36,background:C.green,borderRadius:"var(--r)",display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontSize:16,fontWeight:700,flexShrink:0}}>✓</div>
+              <div>
+                <div style={{fontSize:14,fontWeight:700,color:C.green}}>匯出成功！</div>
+                <div style={{fontSize:11,color:C.text3,marginTop:2}}>Excel 已下載，包含「盤點清單」與「儲位明細」兩個分頁</div>
+              </div>
+              <div style={{flex:1}}/>
+              <Btn onClick={()=>{setStep(0);setMainData([]);setSampled([]);setFileName("");setTurnoverMap(null);setUsingTurnover(false);}}>重新開始</Btn>
+            </div>
+
+            <div style={{display:"flex",gap:12,marginBottom:20,flexWrap:"wrap"}}>
+              <Card style={{padding:"14px 20px",borderLeft:`3px solid ${C.blue}`}}>
+                <div style={{fontSize:11,color:C.text3,marginBottom:4}}>盤點商品數</div>
+                <div style={{fontSize:30,fontWeight:800,color:C.blue,fontFamily:"'SF Mono',monospace"}}>{sampled.length}</div>
+              </Card>
+              <Card style={{padding:"14px 20px",borderLeft:`3px solid ${C.teal}`}}>
+                <div style={{fontSize:11,color:C.text3,marginBottom:4}}>儲位明細列數</div>
+                <div style={{fontSize:30,fontWeight:800,color:C.teal,fontFamily:"'SF Mono',monospace"}}>{detailRows.length}</div>
+              </Card>
+            </div>
+
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
+              <div style={{fontSize:14,fontWeight:700}}>儲位明細表</div>
+              <Badge color={C.teal} bg={C.tealBg}>{detailRows.length} 列</Badge>
+              {usingTurnover&&<Badge color={C.amber} bg={C.amberBg}>迴轉率模式</Badge>}
+            </div>
+            <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:"var(--r-lg)",boxShadow:"var(--shadow)",overflow:"auto"}}>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                <thead>
+                  <tr style={{background:C.surface2,borderBottom:`1px solid ${C.border}`}}>
+                    <th style={{padding:"10px 12px",color:C.text2,textAlign:"left",width:40,fontSize:11,fontWeight:700,letterSpacing:.4,textTransform:"uppercase"}}>#</th>
+                    {detailRows.length>0&&Object.keys(detailRows[0]).map(col=>(
+                      <th key={col} style={{padding:"10px 12px",color:C.text2,textAlign:"left",whiteSpace:"nowrap",fontSize:11,fontWeight:700,letterSpacing:.4,textTransform:"uppercase"}}>{col}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {detailRows.map((row,i)=>{
+                    const cat=row[catField]??"未分類";
+                    const color=catColors[cat]||C.blue;
+                    const is77=String(row["庫區"]).trim()==="77";
+                    return(
+                      <tr key={i} style={{borderBottom:`1px solid ${C.border}`,background:is77?"#fffbf5":i%2===0?C.surface:C.surface2,borderLeft:is77?`3px solid ${C.amber}`:"3px solid transparent"}}>
+                        <td style={{padding:"9px 12px",color:C.text3,fontSize:11}}>{i+1}</td>
+                        {Object.entries(row).map(([k,v])=>(
+                          <td key={k} style={{padding:"9px 12px",whiteSpace:"nowrap"}}>
+                            {k===catField
+                              ?<Badge color={color} bg={color+"15"}>{v}</Badge>
+                              :k==="庫區"
+                              ?<span style={{fontFamily:"'SF Mono',monospace",fontSize:12,fontWeight:700,color:is77?C.amber:C.text2}}>{v}{is77?" (不良品)":""}</span>
+                              :k===locField
+                              ?<span style={{color:C.amber,fontWeight:600,fontFamily:"'SF Mono',monospace",fontSize:12}}>{v}</span>
+                              :k===vehicleField
+                              ?<span style={{color:C.blue,fontWeight:600,fontFamily:"'SF Mono',monospace",fontSize:12}}>{v}</span>
+                              :k==="庫存數量"||k==="可用量"
+                              ?<span style={{fontFamily:"'SF Mono',monospace",fontSize:12}}>{v}</span>
+                              :<span>{v}</span>
+                            }
+                          </td>
+                        ))}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Swap Modal */}
+      {swapTarget!==null&&(
+        <SwapModal
+          row={sampled[swapTarget]}
+          catField={catField} qtyField={qtyField} codeField={codeField}
+          allData={mainData} sampledCodes={sampledCodes}
+          onSwap={doSwap} onClose={()=>setSwapTarget(null)}
+          catColor={catColors[sampled[swapTarget]?.[catField]]||C.blue}
+          turnoverMap={turnoverMap}
+        />
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
